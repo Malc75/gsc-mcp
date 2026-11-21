@@ -1,0 +1,20 @@
+{
+  "name": "gsc-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for Google Search Console: performance queries, URL inspection, sitemaps and SEO reports. Works with Claude Code, Hermes and any MCP client.",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": { "gsc-mcp": "src/index.js" },
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/index.js",
+    "start:http": "node src/index.js --http",
+    "test": "node --test \"test/*.test.js\"",
+    "check": "node --check src/index.js && node --check src/server.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "zod": "^3.25.0"
+  }
+}
