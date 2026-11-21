@@ -28,6 +28,9 @@ the other. It does **not** cover Bing Webmaster Tools, GA4, IndexNow or Core Web
 | `report_cannibalization` | Queries where two or more of your pages share the impressions. |
 | `report_ctr_outliers` | Pages with a CTR under half the median at the same position: title / description candidates. |
 | `report_brand_split` | Branded vs non-branded clicks, impressions and share, with top queries. |
+| `gsc_compare_periods` | Compare **any two date ranges**: totals for both with differences, plus the biggest page or query losers and gainers. |
+| `report_seo_recommendations` | Runs quick wins, CTR outliers, drops, decay and cannibalization together and returns **one ranked list** with a suggested action, confidence and evidence per item. |
+| `report_weekly` | Last 7 days vs the 7 before: totals, movers, new and lost queries, top recommendations, plus a ready-to-send Markdown `report`. Made for scheduling. |
 | `gsc_auth_status` | How the server authenticates and whether write is on (no Google call). |
 | `gsc_submit_sitemap`, `gsc_delete_sitemap`, `gsc_add_site`, `gsc_delete_site` | **Write**, only with `GSC_ALLOW_WRITE=true`. |
 
@@ -59,7 +62,7 @@ Requires Node 22+.
 git clone https://github.com/Malc75/gsc-mcp.git
 cd gsc-mcp
 npm install
-npm test        # 19 tests against a mock Google API; no credentials needed
+npm test        # 31 tests against a mock Google API; no credentials needed
 ```
 
 ## Use with Claude Code
@@ -84,6 +87,27 @@ hermes mcp test gsc
 
 (`--args` must be the last option.) Hermes prefixes the tools, e.g. `mcp_gsc_gsc_list_sites`. Use
 `hermes mcp configure gsc` to hide tools you do not want the agent to see.
+
+## Weekly reports on a schedule
+
+The server does not run anything by itself; your agent calls `report_weekly` on a schedule. With Hermes:
+
+```bash
+hermes cron create "0 8 * * 1" \
+  "Call the gsc report_weekly tool for site https://example.com/ and send me the 'report' text it returns, unchanged. If the call fails, say what error it returned." \
+  --name "Weekly Search Console report" --deliver telegram
+```
+
+That is a Monday 08:00 summary of the week that ended two days earlier. "Monitoring" here means a weekly
+comparison, not live alerts. Any scheduler that can call an MCP tool works the same way.
+
+## How the recommendations are ranked
+
+`report_seo_recommendations` and `report_weekly` order findings by `priority_score = estimated clicks x weight`:
+quick win 1.0, CTR outlier 0.8, traffic drop 0.5, content decay 0.5, cannibalization 0.25. The weights are judgement
+calls that reflect how reliable each kind of estimate is, and every result states its `method` and, per item, its
+`estimate_basis` and `confidence`. Treat them as a way to choose what to work on first, not as forecasts. The
+agent still decides what to do; the tool supplies ranked evidence.
 
 ## HTTP mode (optional)
 
@@ -121,7 +145,7 @@ transport is stateless. If you expose it beyond localhost, put TLS in front of i
 ## Development
 
 ```bash
-npm test      # unit tests for the report maths + end-to-end tests that run the real server over stdio
+npm test      # unit tests for the report maths (11) + end-to-end tests (20) that run the real server over stdio
               # (and HTTP) with a real MCP client against a mock Google API
 ```
 

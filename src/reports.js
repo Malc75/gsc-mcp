@@ -148,3 +148,130 @@ export function brandSplit(rows, brandTerms, { top = 10 } = {}) {
   };
   return { brand_terms: terms, branded: summarise(groups.branded), non_branded: summarise(groups.non_branded) };
 }
+
+// ---- totals, comparison, recommendations, weekly --------------------------------------------
+
+export function totalsFromRow(row) {
+  return {
+    clicks: row?.clicks ?? 0,
+    impressions: row?.impressions ?? 0,
+    ctr: round(row?.ctr ?? 0, 4),
+    position: round(row?.position ?? 0, 1),
+  };
+}
+
+/** Difference between two totals objects (current - previous). Position: negative is better. */
+export function totalsDelta(cur, prev) {
+  const pct = (a, b) => (b ? round(((a - b) / b) * 100, 1) : null);
+  return {
+    clicks: cur.clicks - prev.clicks,
+    clicks_pct: pct(cur.clicks, prev.clicks),
+    impressions: cur.impressions - prev.impressions,
+    impressions_pct: pct(cur.impressions, prev.impressions),
+    ctr: round(cur.ctr - prev.ctr, 4),
+    position: round(cur.position - prev.position, 1),
+  };
+}
+
+/** Queries that earned clicks in one period and none in the other. */
+export function newAndLostQueries(curRows, prevRows, { minClicks = 3, limit = 10 } = {}) {
+  const cur = new Map(curRows.map((r) => [r.query, r]));
+  const prev = new Map(prevRows.map((r) => [r.query, r]));
+  const top = (list) => list.sort((a, b) => b.clicks - a.clicks).slice(0, limit).map((r) => ({ query: r.query, clicks: r.clicks, impressions: r.impressions, position: r.position }));
+  return {
+    new_queries: top(curRows.filter((r) => r.clicks >= minClicks && !(prev.get(r.query)?.clicks > 0))),
+    lost_queries: top(prevRows.filter((r) => r.clicks >= minClicks && !(cur.get(r.query)?.clicks > 0))),
+  };
+}
+
+/**
+ * How much each finding type counts for when ranking. These are judgement weights, published in the
+ * tool output ("method") so a reader can see exactly how the order was produced.
+ */
+export const WEIGHTS = {
+  quick_win: { weight: 1.0, confidence: 'medium', basis: 'extra clicks if CTR reached ~10% (the typical CTR at position 3)' },
+  ctr_outlier: { weight: 0.8, confidence: 'medium', basis: 'extra clicks if CTR matched your median page at the same position' },
+  traffic_drop: { weight: 0.5, confidence: 'low', basis: 'clicks lost vs the previous period; may be seasonal or a tracking change' },
+  content_decay: { weight: 0.5, confidence: 'medium', basis: 'clicks lost across three consecutive windows' },
+  cannibalization: { weight: 0.25, confidence: 'low', basis: 'clicks currently earned by the competing pages (an upper bound on what consolidating could affect)' },
+};
+
+/**
+ * Merge findings from the individual reports into one list ordered by estimated clicks at stake,
+ * weighted by how reliable that kind of estimate is. Every item keeps the numbers it came from.
+ * input: { quickWins, ctrOutliers, losers, decay, cannibalization } (each optional)
+ */
+export function recommendations(input, { limit = 15 } = {}) {
+  const items = [];
+  const add = (type, target, estimated, action, evidence) => {
+    const w = WEIGHTS[type];
+    if (!(estimated > 0)) return;
+    items.push({ type, target, estimated_clicks: estimated, priority_score: round(estimated * w.weight, 1), confidence: w.confidence, estimate_basis: w.basis, action, evidence });
+  };
+
+  for (const q of input.quickWins || []) {
+    add('quick_win', `${q.query} -> ${q.page}`, q.potential_extra_clicks,
+      `Improve this page for "${q.query}": make sure the title and H1 match the query, expand the section that answers it, and link to the page from related pages. It ranks at position ${q.position}.`,
+      { query: q.query, page: q.page, position: q.position, impressions: q.impressions, clicks: q.clicks, ctr: q.ctr });
+  }
+  for (const p of input.ctrOutliers || []) {
+    add('ctr_outlier', p.page, p.potential_extra_clicks,
+      `Rewrite the title and meta description of ${p.page}: its CTR is ${pctText(p.ctr)} against ${pctText(p.median_ctr_at_position)} typical for your pages at position ${p.position}.`,
+      { page: p.page, position: p.position, impressions: p.impressions, clicks: p.clicks, ctr: p.ctr, median_ctr_at_position: p.median_ctr_at_position });
+  }
+  for (const d of input.losers || []) {
+    const target = d.page ?? d.query;
+    add('traffic_drop', target, -d.change,
+      `Find out why ${target} lost ${-d.change} clicks${d.change_pct === null ? '' : ` (${d.change_pct}%)`}: check whether its position changed (${d.previous_position ?? 'n/a'} to ${d.position ?? 'n/a'}), whether it is still indexed (gsc_inspect_url), and whether the topic is seasonal.`,
+      d);
+  }
+  for (const d of input.decay || []) {
+    add('content_decay', d.page, d.lost_clicks,
+      `Refresh ${d.page}: clicks fell from ${d.clicks_oldest} to ${d.clicks_middle} to ${d.clicks_latest} over three consecutive periods. Update outdated facts, add what competitors now cover, and re-promote it internally.`,
+      d);
+  }
+  for (const c of input.cannibalization || []) {
+    const clicks = c.pages.reduce((s, p) => s + p.clicks, 0);
+    add('cannibalization', c.query, clicks,
+      `Several pages compete for "${c.query}" (${c.pages.map((p) => p.page).join(', ')}). Pick one to be the main page, make the others clearly different or merge and redirect them, and link the others to the main page.`,
+      c);
+  }
+
+  items.sort((a, b) => b.priority_score - a.priority_score);
+  return items.slice(0, limit).map((it, i) => ({ rank: i + 1, ...it }));
+}
+
+const pctText = (x) => `${round((x ?? 0) * 100, 1)}%`;
+
+export const RECOMMENDATION_METHOD =
+  'Items are ordered by priority_score = estimated_clicks x type weight (quick_win 1.0, ctr_outlier 0.8, traffic_drop 0.5, content_decay 0.5, cannibalization 0.25). Estimates are heuristics for ordering work, not forecasts.';
+
+/** Plain-text/Markdown rendering of the weekly report, ready to send as a message or email. */
+export function weeklyMarkdown(w) {
+  const t = (x) => `${x.clicks} clicks, ${x.impressions} impressions, CTR ${pctText(x.ctr)}, avg position ${x.position}`;
+  const signed = (n) => (n > 0 ? `+${n}` : `${n}`);
+  const pct = (n) => (n === null ? '' : ` (${n > 0 ? '+' : ''}${n}%)`);
+  const lines = [];
+  lines.push(`# Search Console weekly report: ${w.site}`);
+  lines.push(`Week ${w.period.start} to ${w.period.end} vs ${w.previous_period.start} to ${w.previous_period.end}`);
+  lines.push('');
+  lines.push('## Totals');
+  lines.push(`- This week: ${t(w.totals)}`);
+  lines.push(`- Last week: ${t(w.previous_totals)}`);
+  lines.push(`- Change: clicks ${signed(w.change.clicks)}${pct(w.change.clicks_pct)}, impressions ${signed(w.change.impressions)}${pct(w.change.impressions_pct)}, position ${signed(w.change.position)} (negative is better)`);
+  const block = (title, list, fmt) => {
+    lines.push('');
+    lines.push(`## ${title}`);
+    if (!list.length) lines.push('- none');
+    for (const x of list) lines.push(`- ${fmt(x)}`);
+  };
+  block('Pages gaining clicks', w.top_gainers, (x) => `${x.page}: ${signed(x.change)} (${x.previous_clicks} to ${x.clicks})`);
+  block('Pages losing clicks', w.top_losers, (x) => `${x.page}: ${signed(x.change)} (${x.previous_clicks} to ${x.clicks})`);
+  block('New queries', w.new_queries, (x) => `${x.query}: ${x.clicks} clicks, position ${x.position}`);
+  block('Lost queries', w.lost_queries, (x) => `${x.query}: had ${x.clicks} clicks last week, none this week`);
+  block('Top recommendations', w.recommendations, (x) => `#${x.rank} [${x.type}, ~${x.estimated_clicks} clicks, ${x.confidence} confidence] ${x.action}`);
+  lines.push('');
+  const notes = [...(w.notes || [])];
+  lines.push(`_${notes.join(' ')}_`);
+  return lines.join('\n');
+}
